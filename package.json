@@ -1,8 +1,14 @@
 {
   "private": true,
   "type": "module",
+  "scripts": {
+    "build:extractor": "node scripts/build-extractor.mjs"
+  },
   "dependencies": {
     "@babel/parser": "^7.24.7",
     "@babel/traverse": "^7.24.7"
+  },
+  "devDependencies": {
+    "esbuild": "^0.28.0"
   }
 }
