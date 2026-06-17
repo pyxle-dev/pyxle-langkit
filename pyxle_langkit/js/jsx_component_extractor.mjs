@@ -58,6 +58,62 @@ try {
   exit(1);
 }
 
+// Guard: TypeScript syntax is not supported in a .pyxl client block.
+//
+// Babel parses with the `typescript` plugin (so a stray TS construct does not
+// hard-fail here), but the client component is emitted as plain `.jsx` and
+// bundled by esbuild's JSX loader, which does NOT strip TypeScript — it fails
+// late with a parse error pointing into a generated `.pyxle-build` path instead
+// of the user's `.pyxl` source. Catch it here so the compiler can report a
+// clear, source-located error. Any AST node whose type starts with `TS` is a
+// TypeScript-only construct; plain JS/JSX never produces one (a ternary is a
+// ConditionalExpression, an object literal an ObjectProperty, a JSX `as` prop a
+// JSXAttribute — none are `TS*`), so this has no false positives.
+const TS_CONSTRUCT_LABELS = {
+  TSTypeAnnotation: 'a type annotation (`: Type`)',
+  TSAsExpression: 'an `as` type cast',
+  TSSatisfiesExpression: 'a `satisfies` expression',
+  TSNonNullExpression: 'a non-null assertion (`!`)',
+  TSTypeAssertion: 'a type assertion (`<Type>expr`)',
+  TSInterfaceDeclaration: 'an `interface` declaration',
+  TSTypeAliasDeclaration: 'a `type` alias',
+  TSEnumDeclaration: 'an `enum` declaration',
+  TSModuleDeclaration: 'a `namespace` / `module` declaration',
+  TSDeclareFunction: 'a `declare` statement',
+  TSTypeParameterDeclaration: 'a generic type parameter (`<T>`)',
+  TSTypeParameterInstantiation: 'a generic type argument (`<T>`)',
+  TSParameterProperty: 'a parameter property modifier',
+};
+
+let tsViolation = null;
+traverse(ast, {
+  enter(path) {
+    const nodeType = path.node.type;
+    if (typeof nodeType === 'string' && nodeType.startsWith('TS')) {
+      tsViolation = {
+        type: nodeType,
+        label: TS_CONSTRUCT_LABELS[nodeType] || 'TypeScript-only syntax',
+        line: path.node.loc?.start.line ?? null,
+        column: path.node.loc?.start.column ?? null,
+      };
+      path.stop();
+    }
+  },
+});
+
+if (tsViolation) {
+  console.log(JSON.stringify({
+    ok: false,
+    code: 'ts_in_client_block',
+    message:
+      `TypeScript syntax (${tsViolation.label}) isn't supported in a .pyxl client block yet — ` +
+      'keep the client half plain JSX (see docs/guides/typescript.md).',
+    line: tsViolation.line,
+    column: tsViolation.column,
+  }));
+  exit(0);
+}
+
 const components = [];
 
 /**

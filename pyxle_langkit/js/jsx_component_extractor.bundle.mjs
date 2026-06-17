@@ -43302,6 +43302,46 @@ try {
   }));
   exit(1);
 }
+var TS_CONSTRUCT_LABELS = {
+  TSTypeAnnotation: "a type annotation (`: Type`)",
+  TSAsExpression: "an `as` type cast",
+  TSSatisfiesExpression: "a `satisfies` expression",
+  TSNonNullExpression: "a non-null assertion (`!`)",
+  TSTypeAssertion: "a type assertion (`<Type>expr`)",
+  TSInterfaceDeclaration: "an `interface` declaration",
+  TSTypeAliasDeclaration: "a `type` alias",
+  TSEnumDeclaration: "an `enum` declaration",
+  TSModuleDeclaration: "a `namespace` / `module` declaration",
+  TSDeclareFunction: "a `declare` statement",
+  TSTypeParameterDeclaration: "a generic type parameter (`<T>`)",
+  TSTypeParameterInstantiation: "a generic type argument (`<T>`)",
+  TSParameterProperty: "a parameter property modifier"
+};
+var tsViolation = null;
+traverse(ast, {
+  enter(path) {
+    const nodeType = path.node.type;
+    if (typeof nodeType === "string" && nodeType.startsWith("TS")) {
+      tsViolation = {
+        type: nodeType,
+        label: TS_CONSTRUCT_LABELS[nodeType] || "TypeScript-only syntax",
+        line: path.node.loc?.start.line ?? null,
+        column: path.node.loc?.start.column ?? null
+      };
+      path.stop();
+    }
+  }
+});
+if (tsViolation) {
+  console.log(JSON.stringify({
+    ok: false,
+    code: "ts_in_client_block",
+    message: `TypeScript syntax (${tsViolation.label}) isn't supported in a .pyxl client block yet \u2014 keep the client half plain JSX (see docs/guides/typescript.md).`,
+    line: tsViolation.line,
+    column: tsViolation.column
+  }));
+  exit(0);
+}
 var components = [];
 function extractPropValue(node) {
   if (!node) return null;
