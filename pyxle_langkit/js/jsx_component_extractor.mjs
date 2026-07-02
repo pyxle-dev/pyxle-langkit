@@ -49,13 +49,106 @@ let ast;
 try {
   ast = parse(source, parserOptions);
 } catch (err) {
-  console.error(JSON.stringify({ 
-    ok: false, 
-    message: err.message,
+  // Babel appends the failure's (line:col) to its message, but that coordinate
+  // is relative to the extracted JSX snippet — not the .pyxl file. The compiler
+  // maps err.loc and reports the real file line separately, so strip the
+  // misleading in-message coordinate here.
+  let message = err.message.replace(/\s*\(\d+:\d+\)\s*$/, '');
+  // Babel misreports an unclosed `{ ... }` expression (or a stray `<`) in JSX as
+  // "Unterminated regular expression" — it lexes the `/` in a later `</tag>` as
+  // the start of a regex literal. Add a hint so the real cause is obvious to a
+  // human or an agent reading the diagnostic.
+  if (/Unterminated regular expression/i.test(message)) {
+    message += ' — this usually means an unclosed `{ }` expression or JSX tag earlier in the markup.';
+  }
+  console.error(JSON.stringify({
+    ok: false,
+    message,
     line: err.loc?.line,
     column: err.loc?.column,
   }));
   exit(1);
+}
+
+// Guard: TypeScript syntax is not supported in a .pyxl client block.
+//
+// Babel parses with the `typescript` plugin (so a stray TS construct does not
+// hard-fail here), but the client component is emitted as plain `.jsx` and
+// bundled by esbuild's JSX loader, which does NOT strip TypeScript — it fails
+// late with a parse error pointing into a generated `.pyxle-build` path instead
+// of the user's `.pyxl` source. Catch it here so the compiler can report a
+// clear, source-located error. Any AST node whose type starts with `TS` is a
+// TypeScript-only construct; plain JS/JSX never produces one (a ternary is a
+// ConditionalExpression, an object literal an ObjectProperty, a JSX `as` prop a
+// JSXAttribute — none are `TS*`), so this has no false positives.
+const TS_CONSTRUCT_LABELS = {
+  TSTypeAnnotation: 'a type annotation (`: Type`)',
+  TSAsExpression: 'an `as` type cast',
+  TSSatisfiesExpression: 'a `satisfies` expression',
+  TSNonNullExpression: 'a non-null assertion (`!`)',
+  TSTypeAssertion: 'a type assertion (`<Type>expr`)',
+  TSInterfaceDeclaration: 'an `interface` declaration',
+  TSTypeAliasDeclaration: 'a `type` alias',
+  TSEnumDeclaration: 'an `enum` declaration',
+  TSModuleDeclaration: 'a `namespace` / `module` declaration',
+  TSDeclareFunction: 'a `declare` statement',
+  TSTypeParameterDeclaration: 'a generic type parameter (`<T>`)',
+  TSTypeParameterInstantiation: 'a generic type argument (`<T>`)',
+  TSParameterProperty: 'a parameter property modifier',
+};
+
+let tsViolation = null;
+traverse(ast, {
+  enter(path) {
+    const nodeType = path.node.type;
+    if (typeof nodeType === 'string' && nodeType.startsWith('TS')) {
+      tsViolation = {
+        type: nodeType,
+        label: TS_CONSTRUCT_LABELS[nodeType] || 'TypeScript-only syntax',
+        line: path.node.loc?.start.line ?? null,
+        column: path.node.loc?.start.column ?? null,
+      };
+      path.stop();
+    }
+  },
+});
+
+if (tsViolation) {
+  console.log(JSON.stringify({
+    ok: false,
+    code: 'ts_in_client_block',
+    message:
+      `TypeScript syntax (${tsViolation.label}) isn't supported in a .pyxl client block yet — ` +
+      'keep the client half plain JSX (see docs/guides/typescript.md).',
+    line: tsViolation.line,
+    column: tsViolation.column,
+  }));
+  exit(0);
+}
+
+// Guard: a module may have only one `export default`.
+//
+// @babel/parser does NOT enforce this (it parses two default exports without
+// error), but esbuild — which bundles the client at build time — fails on it.
+// Without this check a duplicate default export sails through `pyxle check` and
+// only breaks later at build, with an error pointing into a generated
+// `.pyxle-build` path. Catch it here so the diagnostic is source-located.
+const defaultExports = ast.program.body.filter(
+  (node) => node.type === 'ExportDefaultDeclaration',
+);
+if (defaultExports.length > 1) {
+  const second = defaultExports[1];
+  console.log(JSON.stringify({
+    ok: false,
+    code: 'duplicate_default_export',
+    message:
+      `Multiple \`export default\` statements (${defaultExports.length}) — a module may ` +
+      'have only one default export. This breaks the build (esbuild); keep a single ' +
+      'default-exported page component.',
+    line: second.loc?.start.line ?? null,
+    column: second.loc?.start.column ?? null,
+  }));
+  exit(0);
 }
 
 const components = [];
