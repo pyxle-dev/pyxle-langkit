@@ -49,9 +49,21 @@ let ast;
 try {
   ast = parse(source, parserOptions);
 } catch (err) {
-  console.error(JSON.stringify({ 
-    ok: false, 
-    message: err.message,
+  // Babel appends the failure's (line:col) to its message, but that coordinate
+  // is relative to the extracted JSX snippet — not the .pyxl file. The compiler
+  // maps err.loc and reports the real file line separately, so strip the
+  // misleading in-message coordinate here.
+  let message = err.message.replace(/\s*\(\d+:\d+\)\s*$/, '');
+  // Babel misreports an unclosed `{ ... }` expression (or a stray `<`) in JSX as
+  // "Unterminated regular expression" — it lexes the `/` in a later `</tag>` as
+  // the start of a regex literal. Add a hint so the real cause is obvious to a
+  // human or an agent reading the diagnostic.
+  if (/Unterminated regular expression/i.test(message)) {
+    message += ' — this usually means an unclosed `{ }` expression or JSX tag earlier in the markup.';
+  }
+  console.error(JSON.stringify({
+    ok: false,
+    message,
     line: err.loc?.line,
     column: err.loc?.column,
   }));
@@ -110,6 +122,31 @@ if (tsViolation) {
       'keep the client half plain JSX (see docs/guides/typescript.md).',
     line: tsViolation.line,
     column: tsViolation.column,
+  }));
+  exit(0);
+}
+
+// Guard: a module may have only one `export default`.
+//
+// @babel/parser does NOT enforce this (it parses two default exports without
+// error), but esbuild — which bundles the client at build time — fails on it.
+// Without this check a duplicate default export sails through `pyxle check` and
+// only breaks later at build, with an error pointing into a generated
+// `.pyxle-build` path. Catch it here so the diagnostic is source-located.
+const defaultExports = ast.program.body.filter(
+  (node) => node.type === 'ExportDefaultDeclaration',
+);
+if (defaultExports.length > 1) {
+  const second = defaultExports[1];
+  console.log(JSON.stringify({
+    ok: false,
+    code: 'duplicate_default_export',
+    message:
+      `Multiple \`export default\` statements (${defaultExports.length}) — a module may ` +
+      'have only one default export. This breaks the build (esbuild); keep a single ' +
+      'default-exported page component.',
+    line: second.loc?.start.line ?? null,
+    column: second.loc?.start.column ?? null,
   }));
   exit(0);
 }

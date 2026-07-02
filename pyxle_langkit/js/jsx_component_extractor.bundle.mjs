@@ -43294,9 +43294,13 @@ var ast;
 try {
   ast = (0, import_parser.parse)(source, parserOptions);
 } catch (err) {
+  let message = err.message.replace(/\s*\(\d+:\d+\)\s*$/, "");
+  if (/Unterminated regular expression/i.test(message)) {
+    message += " \u2014 this usually means an unclosed `{ }` expression or JSX tag earlier in the markup.";
+  }
   console.error(JSON.stringify({
     ok: false,
-    message: err.message,
+    message,
     line: err.loc?.line,
     column: err.loc?.column
   }));
@@ -43339,6 +43343,20 @@ if (tsViolation) {
     message: `TypeScript syntax (${tsViolation.label}) isn't supported in a .pyxl client block yet \u2014 keep the client half plain JSX (see docs/guides/typescript.md).`,
     line: tsViolation.line,
     column: tsViolation.column
+  }));
+  exit(0);
+}
+var defaultExports = ast.program.body.filter(
+  (node) => node.type === "ExportDefaultDeclaration"
+);
+if (defaultExports.length > 1) {
+  const second = defaultExports[1];
+  console.log(JSON.stringify({
+    ok: false,
+    code: "duplicate_default_export",
+    message: `Multiple \`export default\` statements (${defaultExports.length}) \u2014 a module may have only one default export. This breaks the build (esbuild); keep a single default-exported page component.`,
+    line: second.loc?.start.line ?? null,
+    column: second.loc?.start.column ?? null
   }));
   exit(0);
 }
