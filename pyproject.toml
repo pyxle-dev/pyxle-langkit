@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "pyxle-langkit"
-version = "0.3.4"
+version = "0.3.5"
 description = "Language tools for Pyxle: LSP server, linter, and editor integrations."
 readme = "README.md"
 authors = [

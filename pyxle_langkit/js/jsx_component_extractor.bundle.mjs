@@ -13,7 +13,11 @@ var __require = /* @__PURE__ */ ((x) => typeof require !== "undefined" ? require
   throw Error('Dynamic require of "' + x + '" is not supported');
 });
 var __commonJS = (cb, mod) => function __require2() {
-  return mod || (0, cb[__getOwnPropNames(cb)[0]])((mod = { exports: {} }).exports, mod), mod.exports;
+  try {
+    return mod || (0, cb[__getOwnPropNames(cb)[0]])((mod = { exports: {} }).exports, mod), mod.exports;
+  } catch (e) {
+    throw mod = 0, e;
+  }
 };
 var __copyProps = (to, from, except, desc) => {
   if (from && typeof from === "object" || typeof from === "function") {
@@ -1985,7 +1989,7 @@ var require_lib = __commonJS({
       }
       flowParseDeclareVariable(node) {
         this.next();
-        node.id = this.flowParseTypeAnnotatableIdentifier(true);
+        node.id = this.flowParseTypeAnnotatableIdentifier();
         this.scope.declareName(node.id.name, 5, node.id.loc.start);
         this.semicolon();
         return this.finishNode(node, "DeclareVariable");
@@ -2159,9 +2163,14 @@ var require_lib = __commonJS({
           reservedType: word
         });
       }
-      flowParseRestrictedIdentifier(liberal, declaration) {
+      flowParseRestrictedIdentifierName(liberal, declaration) {
         this.checkReservedType(this.state.value, this.state.startLoc, declaration);
-        return this.parseIdentifier(liberal);
+        return this.parseIdentifierName(liberal);
+      }
+      flowParseRestrictedIdentifier(liberal, declaration) {
+        const node = this.startNode();
+        const name = this.flowParseRestrictedIdentifierName(liberal, declaration);
+        return this.createIdentifier(node, name);
       }
       flowParseTypeAlias(node) {
         node.id = this.flowParseRestrictedIdentifier(false, true);
@@ -2195,14 +2204,21 @@ var require_lib = __commonJS({
         this.semicolon();
         return this.finishNode(node, "OpaqueType");
       }
+      flowParseTypeParameterBound() {
+        if (this.match(14) || this.isContextual(81)) {
+          const node = this.startNode();
+          this.next();
+          node.typeAnnotation = this.flowParseType();
+          return this.finishNode(node, "TypeAnnotation");
+        }
+      }
       flowParseTypeParameter(requireDefault = false) {
         const nodeStartLoc = this.state.startLoc;
         const node = this.startNode();
         const variance = this.flowParseVariance();
-        const ident = this.flowParseTypeAnnotatableIdentifier();
-        node.name = ident.name;
+        node.name = this.flowParseRestrictedIdentifierName();
         node.variance = variance;
-        node.bound = ident.typeAnnotation;
+        node.bound = this.flowParseTypeParameterBound();
         if (this.match(29)) {
           this.eat(29);
           node.default = this.flowParseType();
@@ -2897,13 +2913,13 @@ var require_lib = __commonJS({
         node.typeAnnotation = this.flowParseTypeInitialiser();
         return this.finishNode(node, "TypeAnnotation");
       }
-      flowParseTypeAnnotatableIdentifier(allowPrimitiveOverride) {
-        const ident = allowPrimitiveOverride ? this.parseIdentifier() : this.flowParseRestrictedIdentifier();
+      flowParseTypeAnnotatableIdentifier() {
+        const node = this.startNode();
+        const name = this.parseIdentifierName();
         if (this.match(14)) {
-          ident.typeAnnotation = this.flowParseTypeAnnotation();
-          this.resetEndLocation(ident);
+          node.typeAnnotation = this.flowParseTypeAnnotation();
         }
-        return ident;
+        return this.createIdentifier(node, name);
       }
       typeCastToParameter(node) {
         node.expression.typeAnnotation = node.typeAnnotation;
@@ -5120,6 +5136,7 @@ var require_lib = __commonJS({
                 adjustInnerComments(node, node.properties, commentWS);
                 break;
               case "CallExpression":
+              case "NewExpression":
               case "OptionalCallExpression":
                 adjustInnerComments(node, node.arguments, commentWS);
                 break;
@@ -5132,6 +5149,7 @@ var require_lib = __commonJS({
               case "ObjectMethod":
               case "ClassMethod":
               case "ClassPrivateMethod":
+              case "TSTypeParameterDeclaration":
                 adjustInnerComments(node, node.params, commentWS);
                 break;
               case "ArrayExpression":
@@ -5147,6 +5165,9 @@ var require_lib = __commonJS({
                 break;
               case "TSEnumBody":
                 adjustInnerComments(node, node.members, commentWS);
+                break;
+              case "TSInterfaceBody":
+                adjustInnerComments(node, node.body, commentWS);
                 break;
               default: {
                 if (node.type === "RecordExpression") {
@@ -29603,7 +29624,7 @@ var require_visitors = __commonJS({
         }
         if (shouldIgnoreKey(nodeType)) continue;
         if (!TYPES.includes(nodeType)) {
-          throw new Error(`You gave us a visitor for the node type ${nodeType} but it's not a valid type in @babel/traverse ${"7.29.0"}`);
+          throw new Error(`You gave us a visitor for the node type ${nodeType} but it's not a valid type in @babel/traverse ${"7.29.7"}`);
         }
         const visitors = visitor[nodeType];
         if (typeof visitors === "object") {
@@ -32777,7 +32798,9 @@ var require_source_map = __commonJS({
               line,
               column
             });
-            if (!originalMapping.name && identifierNamePos) {
+            if (originalMapping.name && (identifierNamePos || identifierName != null && originalMapping.column === column)) {
+              identifierName = originalMapping.name;
+            } else if (identifierNamePos) {
               const originalIdentifierMapping = (0, _traceMapping.originalPositionFor)(this._inputMap, identifierNamePos);
               if (originalIdentifierMapping.name) {
                 identifierName = originalIdentifierMapping.name;
@@ -32888,9 +32911,9 @@ var require_buffer = __commonJS({
         };
         return result;
       }
-      append(str, maybeNewline) {
+      append(str, maybeNewline, ignoreMapping = false) {
         this._flush();
-        this._append(str, maybeNewline);
+        this._append(str, maybeNewline, ignoreMapping);
       }
       appendChar(char) {
         this._flush();
@@ -32936,7 +32959,7 @@ var require_buffer = __commonJS({
           position.column = 0;
         }
       }
-      _append(str, maybeNewline) {
+      _append(str, maybeNewline, ignoreMapping) {
         const len = str.length;
         const position = this._position;
         const sourcePos = this._sourcePosition;
@@ -32949,7 +32972,7 @@ var require_buffer = __commonJS({
         } else {
           this._str += str;
         }
-        const hasMap = this._map !== null;
+        const hasMap = !ignoreMapping && this._map !== null;
         if (!maybeNewline && !hasMap) {
           position.column += len;
           return;
@@ -33033,12 +33056,15 @@ var require_buffer = __commonJS({
       _normalizePosition(prop, loc, columnOffset) {
         this._flush();
         const pos = loc[prop];
-        const target = this._sourcePosition;
         if (pos) {
-          target.line = pos.line;
-          target.column = Math.max(pos.column + columnOffset, 0);
-          target.filename = loc.filename;
+          this.setSourcePosition(pos.line, Math.max(pos.column + columnOffset, 0));
+          this._sourcePosition.filename = loc.filename;
         }
+      }
+      setSourcePosition(line, column) {
+        const target = this._sourcePosition;
+        target.line = line;
+        target.column = column;
       }
       getCurrentColumn() {
         return this._position.column + (this._queuedChar ? 1 : 0);
@@ -37644,7 +37670,8 @@ var require_printer = __commonJS({
         const spacesCount = count > 0 ? column : column - this._buf.getCurrentColumn();
         if (spacesCount > 0) {
           const spaces = this._originalCode ? this._originalCode.slice(index - spacesCount, index).replace(/[^\t\x0B\f \xA0\u1680\u2000-\u200A\u202F\u205F\u3000\uFEFF]/gu, " ") : " ".repeat(spacesCount);
-          this._append(spaces, false);
+          this._buf.append(spaces, false, true);
+          this._buf.setSourcePosition(line, column);
           this.setLastChar(32);
         }
       }
@@ -43290,10 +43317,196 @@ try {
   console.error(JSON.stringify({ ok: false, message: `Failed to read source: ${err.message}` }));
   exit(1);
 }
+var UNCLOSED_TAG_REASONS = /* @__PURE__ */ new Set([
+  "UnterminatedJsxContent",
+  "MissingClosingTagElement",
+  "MissingClosingTagFragment"
+]);
+var HEALING_CLOSER = "</__pyxleUnclosedTagProbe__>";
+function jsxTagName(nameNode) {
+  switch (nameNode.type) {
+    case "JSXIdentifier":
+      return nameNode.name;
+    case "JSXNamespacedName":
+      return `${nameNode.namespace.name}:${nameNode.name.name}`;
+    case "JSXMemberExpression":
+      return `${jsxTagName(nameNode.object)}.${jsxTagName(nameNode.property)}`;
+    default:
+      return null;
+  }
+}
+function lineColumnAt(text, index) {
+  let line = 1;
+  let lastBreak = -1;
+  for (let i = 0; i < index; i += 1) {
+    if (text.charCodeAt(i) === 10) {
+      line += 1;
+      lastBreak = i;
+    }
+  }
+  return { line, column: index - lastBreak - 1 };
+}
+function collectUnclosedCandidates(program, isSynthetic) {
+  const candidates = [];
+  const ancestors = [];
+  const closerMatchesAncestor = (closing) => {
+    if (closing.type === "JSXClosingFragment") {
+      return ancestors.some((node) => node.type === "JSXFragment");
+    }
+    const closeName = jsxTagName(closing.name);
+    return closeName !== null && ancestors.some(
+      (node) => node.type === "JSXElement" && jsxTagName(node.openingElement.name) === closeName
+    );
+  };
+  const isUnclosed = (closing, openName) => {
+    if (!closing) return true;
+    if (isSynthetic(closing.start)) return true;
+    if (closing.type === "JSXClosingFragment") {
+      return openName !== null && closerMatchesAncestor(closing);
+    }
+    const closeName = jsxTagName(closing.name);
+    if (closeName === openName) return false;
+    return closerMatchesAncestor(closing);
+  };
+  const visit = (node) => {
+    if (!node || typeof node !== "object") return;
+    if (Array.isArray(node)) {
+      node.forEach(visit);
+      return;
+    }
+    if (typeof node.type !== "string") return;
+    const isElement = node.type === "JSXElement";
+    const isFragment = node.type === "JSXFragment";
+    if (isElement || isFragment) {
+      const opening = isElement ? node.openingElement : node.openingFragment;
+      const closing = isElement ? node.closingElement : node.closingFragment;
+      const openName = isElement ? jsxTagName(node.openingElement.name) : null;
+      if ((isFragment || !opening.selfClosing) && isUnclosed(closing, openName)) {
+        candidates.push({
+          name: openName,
+          depth: ancestors.length,
+          start: opening.start
+        });
+      }
+      ancestors.push(node);
+    }
+    for (const key of Object.keys(node)) {
+      if (key === "loc" || key === "extra" || key.endsWith("Comments")) continue;
+      visit(node[key]);
+    }
+    if (isElement || isFragment) ancestors.pop();
+  };
+  visit(program);
+  return candidates;
+}
+var BRACKET_CLOSERS = [")", "}", "]"];
+var BRACKET_LIMIT = 8;
+var LINE_BOUNDARY_LIMIT = 32;
+var PARSE_BUDGET = 64;
+function closerSpliceCandidates(healed, textStart, toOriginalIndex) {
+  const boundaries = [healed.length];
+  for (let i = healed.indexOf("\n", textStart); i !== -1; i = healed.indexOf("\n", i + 1)) {
+    boundaries.push(i + 1);
+  }
+  boundaries.sort((a, b) => b - a);
+  const candidates = [];
+  const seen = /* @__PURE__ */ new Set();
+  for (const healedIndex of [textStart, ...boundaries.slice(0, LINE_BOUNDARY_LIMIT)]) {
+    const original = toOriginalIndex(healedIndex);
+    if (original === null || seen.has(original)) continue;
+    seen.add(original);
+    candidates.push(original);
+  }
+  return candidates;
+}
+function parseWithHealing(src, closerLimit) {
+  let budget = PARSE_BUDGET;
+  const attempt = (insertions, closersUsed, bracketsUsed) => {
+    if (budget <= 0) return null;
+    budget -= 1;
+    const sorted = insertions.slice().sort((a, b) => a.at - b.at);
+    let healed = "";
+    let previous = 0;
+    for (const insertion of sorted) {
+      healed += src.slice(previous, insertion.at) + insertion.text;
+      previous = insertion.at;
+    }
+    healed += src.slice(previous);
+    const toOriginalIndex = (healedIndex) => {
+      let shift = 0;
+      for (const insertion of sorted) {
+        const start = insertion.at + shift;
+        if (healedIndex < start) break;
+        if (healedIndex < start + insertion.text.length) return null;
+        shift += insertion.text.length;
+      }
+      return healedIndex - shift;
+    };
+    let recoveryErr;
+    try {
+      const ast2 = (0, import_parser.parse)(healed, { ...parserOptions, errorRecovery: true });
+      return { ast: ast2, toOriginalIndex };
+    } catch (caught) {
+      recoveryErr = caught;
+    }
+    const errIndex = recoveryErr?.loc?.index;
+    if (typeof errIndex !== "number") return null;
+    if (recoveryErr.reasonCode === "UnterminatedJsxContent" && closersUsed < closerLimit) {
+      for (const at of closerSpliceCandidates(healed, errIndex, toOriginalIndex)) {
+        const healedResult = attempt(
+          [...insertions, { at, text: HEALING_CLOSER }],
+          closersUsed + 1,
+          bracketsUsed
+        );
+        if (healedResult) return healedResult;
+      }
+    } else if (recoveryErr.reasonCode === "UnexpectedToken" && errIndex === healed.length && bracketsUsed < BRACKET_LIMIT) {
+      for (const bracket of BRACKET_CLOSERS) {
+        const healedResult = attempt(
+          [...insertions, { at: src.length, text: bracket }],
+          closersUsed,
+          bracketsUsed + 1
+        );
+        if (healedResult) return healedResult;
+      }
+    }
+    return null;
+  };
+  return attempt([], 0, 0);
+}
+function findInnermostUnclosedTag(src) {
+  const closerLimit = Math.min(64, (src.match(/</g) ?? []).length);
+  const healing = parseWithHealing(src, closerLimit);
+  if (healing === null) return null;
+  const candidates = collectUnclosedCandidates(
+    healing.ast.program,
+    (index) => healing.toOriginalIndex(index) === null
+  );
+  if (candidates.length === 0) return null;
+  candidates.sort((a, b) => b.depth - a.depth || b.start - a.start);
+  const originalStart = healing.toOriginalIndex(candidates[0].start);
+  if (originalStart === null) return null;
+  return { name: candidates[0].name, ...lineColumnAt(src, originalStart) };
+}
 var ast;
 try {
   ast = (0, import_parser.parse)(source, parserOptions);
 } catch (err) {
+  if (UNCLOSED_TAG_REASONS.has(err.reasonCode)) {
+    const unclosed = findInnermostUnclosedTag(source);
+    if (unclosed) {
+      const tag = unclosed.name === null ? "<>" : `<${unclosed.name}>`;
+      const fix = unclosed.name === null ? "add the matching `</>`" : `add the matching \`</${unclosed.name}>\` or make the tag self-closing`;
+      console.error(JSON.stringify({
+        ok: false,
+        code: "unclosed_jsx_tag",
+        message: `${tag} is never closed \u2014 ${fix}.`,
+        line: unclosed.line,
+        column: unclosed.column
+      }));
+      exit(1);
+    }
+  }
   let message = err.message.replace(/\s*\(\d+:\d+\)\s*$/, "");
   if (/Unterminated regular expression/i.test(message)) {
     message += " \u2014 this usually means an unclosed `{ }` expression or JSX tag earlier in the markup.";
