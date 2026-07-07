@@ -45,10 +45,316 @@ try {
   exit(1);
 }
 
+// Babel error classes that mean "some open JSX tag was never closed". Babel
+// anchors these at the DETECTION site — `UnterminatedJsxContent` at the end of
+// the snippet (naming no tag at all), `MissingClosingTag*` at whichever LATER
+// closing tag exposed the problem — so the diagnostic drifts away from the tag
+// the user actually forgot to close. For these we locate the innermost unclosed
+// open tag ourselves (see findInnermostUnclosedTag) and re-anchor there.
+const UNCLOSED_TAG_REASONS = new Set([
+  'UnterminatedJsxContent',
+  'MissingClosingTagElement',
+  'MissingClosingTagFragment',
+]);
+
+// Synthetic closing tag spliced in while healing an `UnterminatedJsxContent`
+// failure so Babel's error recovery can produce an AST. Unclosed elements are
+// detected by closing-tag POSITION (inside a spliced probe), never by this
+// name, so a user tag can't collide with it.
+const HEALING_CLOSER = '</__pyxleUnclosedTagProbe__>';
+
+/** Qualified JSX tag name (`Foo`, `Foo.Bar`, `svg:path`) for a JSX name node. */
+function jsxTagName(nameNode) {
+  switch (nameNode.type) {
+    case 'JSXIdentifier':
+      return nameNode.name;
+    case 'JSXNamespacedName':
+      return `${nameNode.namespace.name}:${nameNode.name.name}`;
+    case 'JSXMemberExpression':
+      return `${jsxTagName(nameNode.object)}.${jsxTagName(nameNode.property)}`;
+    default:
+      return null;
+  }
+}
+
+/** 1-based line and 0-based column (Babel convention) of `index` in `text`. */
+function lineColumnAt(text, index) {
+  let line = 1;
+  let lastBreak = -1;
+  for (let i = 0; i < index; i += 1) {
+    if (text.charCodeAt(i) === 10) {
+      line += 1;
+      lastBreak = i;
+    }
+  }
+  return { line, column: index - lastBreak - 1 };
+}
+
+/**
+ * Walk a recovered AST and collect every JSX element/fragment whose closing
+ * tag is missing, synthetic (a spliced-in healing closer), or stolen from an
+ * enclosing element (Babel pairs a closing tag with the innermost open
+ * element, so `<div><section></div>` closes `<section>` with `</div>`). A
+ * mismatched closing tag whose name matches NO enclosing open tag (a
+ * `</sektion>` typo) is a mismatched close, not an unclosed tag, and is
+ * deliberately not collected.
+ *
+ * Candidates carry `name: null` for fragments (`<>`), plus their nesting depth
+ * and opening-tag start so the innermost one can be chosen.
+ */
+function collectUnclosedCandidates(program, isSynthetic) {
+  const candidates = [];
+  const ancestors = [];
+
+  const closerMatchesAncestor = (closing) => {
+    if (closing.type === 'JSXClosingFragment') {
+      return ancestors.some((node) => node.type === 'JSXFragment');
+    }
+    const closeName = jsxTagName(closing.name);
+    return (
+      closeName !== null
+      && ancestors.some(
+        (node) =>
+          node.type === 'JSXElement'
+          && jsxTagName(node.openingElement.name) === closeName,
+      )
+    );
+  };
+
+  const isUnclosed = (closing, openName) => {
+    if (!closing) return true;
+    if (isSynthetic(closing.start)) return true; // spliced healing closer
+    if (closing.type === 'JSXClosingFragment') {
+      // A `</>` legitimately closes only a fragment; on an element it was
+      // stolen from an enclosing fragment.
+      return openName !== null && closerMatchesAncestor(closing);
+    }
+    const closeName = jsxTagName(closing.name);
+    if (closeName === openName) return false;
+    return closerMatchesAncestor(closing);
+  };
+
+  const visit = (node) => {
+    if (!node || typeof node !== 'object') return;
+    if (Array.isArray(node)) {
+      node.forEach(visit);
+      return;
+    }
+    if (typeof node.type !== 'string') return;
+
+    const isElement = node.type === 'JSXElement';
+    const isFragment = node.type === 'JSXFragment';
+    if (isElement || isFragment) {
+      const opening = isElement ? node.openingElement : node.openingFragment;
+      const closing = isElement ? node.closingElement : node.closingFragment;
+      const openName = isElement ? jsxTagName(node.openingElement.name) : null;
+      if ((isFragment || !opening.selfClosing) && isUnclosed(closing, openName)) {
+        candidates.push({
+          name: openName,
+          depth: ancestors.length,
+          start: opening.start,
+        });
+      }
+      ancestors.push(node);
+    }
+    for (const key of Object.keys(node)) {
+      if (key === 'loc' || key === 'extra' || key.endsWith('Comments')) continue;
+      visit(node[key]);
+    }
+    if (isElement || isFragment) ancestors.pop();
+  };
+
+  visit(program);
+  return candidates;
+}
+
+// Closers spliced while healing when Babel dies with unexpected end-of-input:
+// an unclosed `(`, `{`, or `[` after the JSX stays FATAL even under error
+// recovery, so a truncated snippet (or one whose trailing `);` was swallowed
+// into JSX text) needs its bracket closed too before an AST can come out.
+const BRACKET_CLOSERS = [')', '}', ']'];
+// At most this many bracket closers may be appended along one healing branch;
+// real snippets rarely truncate more than a couple of brackets deep.
+const BRACKET_LIMIT = 8;
+// Line boundaries tried as closer splice points per failure, counted from the
+// end of the failing JSX-text region (see closerSpliceCandidates).
+const LINE_BOUNDARY_LIMIT = 32;
+// Total parse attempts allowed across ALL healing branches, so backtracking
+// stays cheap even on pathological input.
+const PARSE_BUDGET = 64;
+
+/**
+ * Candidate splice points (in ORIGINAL source coordinates) for one
+ * `UnterminatedJsxContent` failure whose JSX-text token starts at `textStart`
+ * (healed coordinates) and runs to end-of-input, in the order they should be
+ * tried:
+ *
+ * 1. The failing token's START — right after the last complete child, so
+ *    trailing real code (`);` / `}`) is re-lexed as code. Heals every
+ *    element-children geometry and is tried first to keep those byte-stable.
+ * 2. Each LINE BOUNDARY inside the failing text region, latest-first (bounded
+ *    to `LINE_BOUNDARY_LIMIT`), plus end-of-input. Bare-text children make
+ *    splice point 1 eject that text out of JSX (a fatal `Unexpected token`),
+ *    but splicing at the newline after the last text line — before the `);`
+ *    line — keeps the text inside the element and parses.
+ */
+function closerSpliceCandidates(healed, textStart, toOriginalIndex) {
+  const boundaries = [healed.length];
+  for (let i = healed.indexOf('\n', textStart); i !== -1; i = healed.indexOf('\n', i + 1)) {
+    boundaries.push(i + 1);
+  }
+  boundaries.sort((a, b) => b - a);
+  const candidates = [];
+  const seen = new Set();
+  for (const healedIndex of [textStart, ...boundaries.slice(0, LINE_BOUNDARY_LIMIT)]) {
+    const original = toOriginalIndex(healedIndex);
+    if (original === null || seen.has(original)) continue;
+    seen.add(original);
+    candidates.push(original);
+  }
+  return candidates;
+}
+
+/**
+ * Parse `src` with `errorRecovery: true`, splicing in healing text until an
+ * AST comes out.
+ *
+ * Two failure classes stay fatal even under error recovery and are healed by
+ * a depth-first search over splice points (each recursion step adds ONE
+ * insertion, then reparses; a branch whose parse dies differently is
+ * abandoned and the next candidate is tried):
+ *
+ * - `UnterminatedJsxContent` (the tokenizer hits end-of-input while lexing
+ *   JSX text): one `HEALING_CLOSER` is spliced in at each candidate from
+ *   `closerSpliceCandidates`, at most `closerLimit` closers per branch.
+ * - `UnexpectedToken` exactly AT end-of-input (an unclosed `(`/`{`/`[` left
+ *   over after the JSX healed — e.g. the snippet is truncated, or a closer
+ *   spliced at end-of-input swallowed the trailing `);` into JSX text): each
+ *   `BRACKET_CLOSERS` character is appended, at most `BRACKET_LIMIT` per
+ *   branch. Wrong brackets die on the next parse and are backtracked.
+ *
+ * Insertions are tracked in ORIGINAL source coordinates; the returned
+ * `toOriginalIndex` maps a healed-source index back (or to `null` when it
+ * falls inside spliced text, i.e. is synthetic).
+ *
+ * Returns `{ ast, toOriginalIndex }`, or null when a branch-limit or the
+ * global `PARSE_BUDGET` is exhausted, or every branch hits an unhealable
+ * fatal error.
+ */
+function parseWithHealing(src, closerLimit) {
+  let budget = PARSE_BUDGET;
+
+  const attempt = (insertions, closersUsed, bracketsUsed) => {
+    if (budget <= 0) return null;
+    budget -= 1;
+    // Stable sort: insertions at the SAME index keep insertion order, so an
+    // end-of-input `</probe>` + `)` + `}` sequence heals in the order added.
+    const sorted = insertions.slice().sort((a, b) => a.at - b.at);
+    let healed = '';
+    let previous = 0;
+    for (const insertion of sorted) {
+      healed += src.slice(previous, insertion.at) + insertion.text;
+      previous = insertion.at;
+    }
+    healed += src.slice(previous);
+    const toOriginalIndex = (healedIndex) => {
+      let shift = 0;
+      for (const insertion of sorted) {
+        const start = insertion.at + shift;
+        if (healedIndex < start) break;
+        if (healedIndex < start + insertion.text.length) return null;
+        shift += insertion.text.length;
+      }
+      return healedIndex - shift;
+    };
+
+    let recoveryErr;
+    try {
+      const ast = parse(healed, { ...parserOptions, errorRecovery: true });
+      return { ast, toOriginalIndex };
+    } catch (caught) {
+      recoveryErr = caught;
+    }
+
+    const errIndex = recoveryErr?.loc?.index;
+    if (typeof errIndex !== 'number') return null;
+    if (recoveryErr.reasonCode === 'UnterminatedJsxContent' && closersUsed < closerLimit) {
+      for (const at of closerSpliceCandidates(healed, errIndex, toOriginalIndex)) {
+        const healedResult = attempt(
+          [...insertions, { at, text: HEALING_CLOSER }],
+          closersUsed + 1,
+          bracketsUsed,
+        );
+        if (healedResult) return healedResult;
+      }
+    } else if (
+      recoveryErr.reasonCode === 'UnexpectedToken'
+      && errIndex === healed.length
+      && bracketsUsed < BRACKET_LIMIT
+    ) {
+      for (const bracket of BRACKET_CLOSERS) {
+        const healedResult = attempt(
+          [...insertions, { at: src.length, text: bracket }],
+          closersUsed,
+          bracketsUsed + 1,
+        );
+        if (healedResult) return healedResult;
+      }
+    }
+    return null;
+  };
+
+  return attempt([], 0, 0);
+}
+
+/**
+ * Find the innermost unclosed open tag in `src`. Returns
+ * `{ name, line, column }` (`name: null` for a fragment; line 1-based, column
+ * 0-based, both in `src` coordinates), or null when there is no unclosed tag —
+ * e.g. the error is really a mismatched closing tag.
+ */
+function findInnermostUnclosedTag(src) {
+  const closerLimit = Math.min(64, (src.match(/</g) ?? []).length);
+  const healing = parseWithHealing(src, closerLimit);
+  if (healing === null) return null;
+  const candidates = collectUnclosedCandidates(
+    healing.ast.program,
+    (index) => healing.toOriginalIndex(index) === null,
+  );
+  if (candidates.length === 0) return null; // mismatched close, not unclosed
+  // Innermost first; among candidates at the same depth, the latest open tag.
+  candidates.sort((a, b) => b.depth - a.depth || b.start - a.start);
+  const originalStart = healing.toOriginalIndex(candidates[0].start);
+  if (originalStart === null) return null;
+  return { name: candidates[0].name, ...lineColumnAt(src, originalStart) };
+}
+
 let ast;
 try {
   ast = parse(source, parserOptions);
 } catch (err) {
+  // An unclosed tag: re-anchor at the offending OPEN tag and always name it,
+  // instead of Babel's detection-site anchor (a later closing tag, or a
+  // tag-less "Unterminated JSX contents." at the end of the snippet).
+  // Mismatched closing tags (`</sektion>` typo) yield no unclosed candidate
+  // and keep Babel's message below, unchanged.
+  if (UNCLOSED_TAG_REASONS.has(err.reasonCode)) {
+    const unclosed = findInnermostUnclosedTag(source);
+    if (unclosed) {
+      const tag = unclosed.name === null ? '<>' : `<${unclosed.name}>`;
+      const fix = unclosed.name === null
+        ? 'add the matching `</>`'
+        : `add the matching \`</${unclosed.name}>\` or make the tag self-closing`;
+      console.error(JSON.stringify({
+        ok: false,
+        code: 'unclosed_jsx_tag',
+        message: `${tag} is never closed — ${fix}.`,
+        line: unclosed.line,
+        column: unclosed.column,
+      }));
+      exit(1);
+    }
+  }
   // Babel appends the failure's (line:col) to its message, but that coordinate
   // is relative to the extracted JSX snippet — not the .pyxl file. The compiler
   // maps err.loc and reports the real file line separately, so strip the
