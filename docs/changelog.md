@@ -2,7 +2,7 @@
 
 Release notes for Pyxle Langkit — the language toolkit behind `pyxle check`, the LSP server, and the VS Code extension. To upgrade, run `pip install --upgrade pyxle-langkit` (or `pip install --upgrade 'pyxle-framework[langkit]'`).
 
-## 0.3.5 — Unreleased
+## 0.3.5 — 2026-07-09
 
 - **`pyxle-langkit lint`'s React analysis works on a clean pip install.** The React parser runner imported `@babel/parser` as a bare specifier, which Node resolves from the *runner's* directory — never from the linted project — so the shipped wheel produced an `ERR_MODULE_NOT_FOUND` traceback and, worse, a false `react/default-export` warning (the crashed analysis read as "no exports found"). The runner now ships as a self-contained bundle with Babel inlined, exactly like the JSX component extractor. And a genuinely unavailable analyzer (Node missing, timeout) now surfaces as a single **error**-severity `react/analyzer-unavailable` diagnostic that fails the lint, instead of exit 0 with misleading rule warnings.
 
