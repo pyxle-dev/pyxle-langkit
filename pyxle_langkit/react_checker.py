@@ -73,9 +73,22 @@ class ReactAnalysisResult:
 
     exports: tuple[ReactExport, ...]
     syntax_errors: tuple[ReactSyntaxError, ...]
+    #: ``False`` when the analysis could not run at all (Node missing, the
+    #: runner script absent/broken, timeout, unparseable output). Consumers
+    #: must not treat an unavailable result as "analyzed: nothing found" —
+    #: that turns infrastructure failures into false rule violations.
+    available: bool = True
+    #: Human-readable reason when ``available`` is ``False``.
+    unavailable_reason: str = ""
 
 
 _EMPTY_RESULT = ReactAnalysisResult(exports=(), syntax_errors=())
+
+
+def _unavailable(reason: str) -> ReactAnalysisResult:
+    return ReactAnalysisResult(
+        exports=(), syntax_errors=(), available=False, unavailable_reason=reason
+    )
 
 # Subprocess timeout in seconds.
 _NODE_TIMEOUT_SECONDS = 10
@@ -106,7 +119,16 @@ class ReactAnalyzer:
     ) -> None:
         self._node_command: tuple[str, ...] = tuple(node_command or ("node",))
         base = Path(__file__).resolve().parent
-        self._runner_path: Path = runner_path or base / "js" / "react_parser_runner.mjs"
+        if runner_path is not None:
+            self._runner_path: Path = runner_path
+        else:
+            # Prefer the self-contained bundle (Babel inlined — works on a
+            # clean pip install with no node_modules, exactly like the JSX
+            # component extractor); fall back to the raw source for the
+            # dev/CI layout where @babel/* is npm-installed.
+            bundled = base / "js" / "react_parser_runner.bundle.mjs"
+            source = base / "js" / "react_parser_runner.mjs"
+            self._runner_path = bundled if bundled.exists() else source
 
     def analyze(self, jsx_code: str) -> ReactAnalysisResult:
         """Parse *jsx_code* through Babel and return exports + errors.
@@ -124,7 +146,7 @@ class ReactAnalyzer:
                 "React parser runner not found at %s; skipping JSX analysis.",
                 self._runner_path,
             )
-            return _EMPTY_RESULT
+            return _unavailable(f"React parser runner not found at {self._runner_path}")
 
         # Write JSX to a temp file for the Node subprocess.
         temp_fd = -1
@@ -140,16 +162,18 @@ class ReactAnalyzer:
             logger.warning(
                 "Node.js is not installed; JSX analysis unavailable."
             )
-            return _EMPTY_RESULT
+            return _unavailable("Node.js is not installed (JSX analysis needs Node)")
         except subprocess.TimeoutExpired:
             logger.warning(
                 "React parser runner timed out after %ds; skipping JSX analysis.",
                 _NODE_TIMEOUT_SECONDS,
             )
-            return _EMPTY_RESULT
-        except Exception:
+            return _unavailable(
+                f"React parser runner timed out after {_NODE_TIMEOUT_SECONDS}s"
+            )
+        except Exception as exc:
             logger.warning("Unexpected error running React parser.", exc_info=True)
-            return _EMPTY_RESULT
+            return _unavailable(f"React parser runner failed: {exc}")
         finally:
             if temp_fd >= 0:
                 try:

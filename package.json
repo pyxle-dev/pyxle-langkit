@@ -2,7 +2,8 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "build:extractor": "node scripts/build-extractor.mjs"
+    "build:extractor": "node scripts/build-extractor.mjs",
+    "build:runner": "node scripts/build-runner.mjs"
   },
   "dependencies": {
     "@babel/parser": "^7.24.7",
