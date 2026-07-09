@@ -463,6 +463,24 @@ class PyxLinter:
             )
             return issues
 
+        # A broken/missing analyzer must surface loudly — never as false rule
+        # violations computed from an empty result, and never with exit 0.
+        if not analysis.available:
+            issues.append(
+                LintIssue(
+                    source="react",
+                    rule="react/analyzer-unavailable",
+                    severity="error",
+                    message=(
+                        f"React analysis could not run: {analysis.unavailable_reason}. "
+                        "JSX rules were skipped."
+                    ),
+                    line=first_jsx_line,
+                    column=0,
+                )
+            )
+            return issues
+
         # Report Babel syntax errors.
         for error in analysis.syntax_errors:
             mapped_line = document.map_jsx_line(error.line) or first_jsx_line

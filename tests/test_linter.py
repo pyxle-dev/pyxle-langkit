@@ -1877,3 +1877,40 @@ class TestScriptEdgeCases:
         strategy = [i for i in issues if "script-strategy-invalid" in i.rule]
         assert len(strategy) == 1
         assert "string literal" in strategy[0].message
+
+
+def test_unavailable_analyzer_is_one_error_not_false_warnings():
+    """A broken React analyzer surfaces as a single error-severity diagnostic
+    and skips the JSX rules — it must not report react/default-export against
+    a file that has a perfectly good default export, and must not exit 0
+    (error severity drives the CLI exit code)."""
+    from pathlib import Path
+
+    from pyxle_langkit.linter import PyxLinter
+    from pyxle_langkit.react_checker import ReactAnalyzer
+
+    source = (
+        "from pyxle.runtime import server\n"
+        "\n"
+        "@server\n"
+        "async def load(request):\n"
+        "    return {}\n"
+        "\n"
+        "import React from 'react';\n"
+        "\n"
+        "export default function Home({ data }) {\n"
+        "    return <div>hi</div>;\n"
+        "}\n"
+    )
+    document = _make_doc(source)
+    broken = ReactAnalyzer(runner_path=Path("/nonexistent/runner.mjs"))
+    linter = PyxLinter(react_analyzer=broken)
+
+    issues = linter.lint(document)
+    react_issues = [i for i in issues if i.source == "react"]
+    assert len(react_issues) == 1
+    only = react_issues[0]
+    assert only.rule == "react/analyzer-unavailable"
+    assert only.severity == "error"
+    assert "could not run" in only.message
+    assert not any(i.rule == "react/default-export" for i in issues)

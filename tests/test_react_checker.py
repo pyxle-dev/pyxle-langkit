@@ -127,7 +127,9 @@ class TestNodeNotFound:
             }
         """)
         result = analyzer.analyze(jsx)
-        assert result == _EMPTY_RESULT
+        assert result.available is False
+        assert 'not found' in result.unavailable_reason
+        assert result.exports == ()
 
 
 # ------------------------------------------------------------------
@@ -263,7 +265,9 @@ class TestSubprocessErrors:
             side_effect=subprocess.TimeoutExpired(cmd="node", timeout=10),
         ):
             result = analyzer.analyze(jsx)
-        assert result == _EMPTY_RESULT
+        assert result.available is False
+        assert 'timed out' in result.unavailable_reason
+        assert result.exports == ()
 
     def test_unexpected_exception_returns_empty(self) -> None:
         analyzer = ReactAnalyzer()
@@ -274,7 +278,9 @@ class TestSubprocessErrors:
             side_effect=OSError("disk error"),
         ):
             result = analyzer.analyze(jsx)
-        assert result == _EMPTY_RESULT
+        assert result.available is False
+        assert 'failed' in result.unavailable_reason
+        assert result.exports == ()
 
     def test_invalid_json_from_node(self) -> None:
         analyzer = ReactAnalyzer()
@@ -285,7 +291,9 @@ class TestSubprocessErrors:
             side_effect=RuntimeError("invalid JSON"),
         ):
             result = analyzer.analyze(jsx)
-        assert result == _EMPTY_RESULT
+        assert result.available is False
+        assert 'failed' in result.unavailable_reason
+        assert result.exports == ()
 
 
 class TestRunNode:
@@ -309,3 +317,33 @@ class TestRunNode:
             result = analyzer._run_node(str(tmp_path / "test.jsx"))
         # Empty output -> "{}" fallback -> parsed as empty dict.
         assert result == {}
+
+
+def test_missing_runner_returns_unavailable(tmp_path):
+    """A missing runner script yields available=False — not an empty result
+    that downstream rules would misread as 'analyzed: nothing found'."""
+    from pyxle_langkit.react_checker import ReactAnalyzer
+
+    analyzer = ReactAnalyzer(runner_path=tmp_path / "nope.mjs")
+    result = analyzer.analyze("export default function P() { return null; }")
+    assert result.available is False
+    assert "not found" in result.unavailable_reason
+    assert result.exports == ()
+
+
+def test_default_runner_prefers_bundle(tmp_path, monkeypatch):
+    """When the self-contained bundle exists next to the source runner, it is
+    selected — that is what ships in the wheel."""
+    from pyxle_langkit import react_checker
+
+    js = tmp_path / "js"
+    js.mkdir()
+    (js / "react_parser_runner.mjs").write_text("// source", encoding="utf-8")
+    (js / "react_parser_runner.bundle.mjs").write_text("// bundle", encoding="utf-8")
+    monkeypatch.setattr(react_checker, "__file__", str(tmp_path / "react_checker.py"))
+    analyzer = react_checker.ReactAnalyzer()
+    assert analyzer._runner_path.name == "react_parser_runner.bundle.mjs"
+
+    (js / "react_parser_runner.bundle.mjs").unlink()
+    analyzer = react_checker.ReactAnalyzer()
+    assert analyzer._runner_path.name == "react_parser_runner.mjs"
