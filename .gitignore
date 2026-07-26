@@ -14,9 +14,14 @@ htmlcov/
 # Node
 node_modules/
 package-lock.json
+# ...except the VS Code extension's. It is a published application, not a
+# library: the lockfile pins the exact dependency tree the .vsix is built from,
+# and CI installs with `npm ci`, which REQUIRES a committed lockfile.
+!editors/vscode/package-lock.json
 
 # VS Code extension build
 editors/vscode/out/
+editors/vscode/out-test/
 editors/vscode/node_modules/
 editors/vscode/*.vsix
 
@@ -30,3 +35,7 @@ editors/vscode/*.vsix
 # OS
 .DS_Store
 Thumbs.db
+
+# macOS AppleDouble metadata
+._*
+.DS_Store

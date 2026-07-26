@@ -1,11 +1,15 @@
 **/*.ts
-!out/**/*.js
+out/**
+!out/extension.js
+out-test/**
 src/**
 test/**
+tsconfig*.json
 node_modules/**
 .vscode/**
 .ruff_cache/**
-tsconfig.json
 esbuild.js
 **/*.map
 **/*.vsix
+**/._*
+**/.DS_Store

@@ -9,8 +9,39 @@ permissions:
   id-token: write  # Required for trusted publishing
 
 jobs:
+  # This repo ships two independent artifacts: the pyxle-langkit Python package
+  # and the VS Code extension. A release that only ships the extension must not
+  # try to re-publish the Python package — PyPI rejects a duplicate version, and
+  # the release would carry a failed workflow. Publish only when the release tag
+  # actually matches the version in pyproject.toml.
+  check-version:
+    name: Does this release match the Python package version?
+    runs-on: ubuntu-latest
+    outputs:
+      publish: ${{ steps.compare.outputs.publish }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - id: compare
+        env:
+          TAG: ${{ github.event.release.tag_name }}
+        run: |
+          version="$(grep -m1 '^version = ' pyproject.toml | cut -d'"' -f2)"
+          tag="${TAG#v}"
+          echo "pyproject version: $version"
+          echo "release tag:       $TAG (normalised: $tag)"
+          if [ "$version" = "$tag" ]; then
+            echo "publish=true" >> "$GITHUB_OUTPUT"
+            echo "Tag matches the Python package version — publishing to PyPI."
+          else
+            echo "publish=false" >> "$GITHUB_OUTPUT"
+            echo "Tag does not match pyproject version — skipping the PyPI publish."
+          fi
+
   publish:
     name: Build and publish to PyPI
+    needs: check-version
+    if: needs.check-version.outputs.publish == 'true'
     runs-on: ubuntu-latest
     environment: pypi
 

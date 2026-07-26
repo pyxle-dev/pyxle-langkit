@@ -28,6 +28,7 @@ import {
     ServerOptions,
 } from "vscode-languageclient/node";
 import { createStatusBar, updateStatus, StatusState } from "./status";
+import { registerDebugSupport } from "./debug";
 
 const LANGUAGE_ID = "pyxle";
 const MAX_RETRIES = 3;
@@ -64,6 +65,8 @@ export function activate(context: vscode.ExtensionContext): void {
                 });
         }),
     );
+
+    registerDebugSupport(context);
 
     resolveAndStart(context);
 }
