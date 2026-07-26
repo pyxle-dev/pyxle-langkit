@@ -49,7 +49,7 @@ The command **"Pyxle: Open Studio"** opens the running dev server's [Studio dash
 
 ## Learn more
 
-- [Debugging `.pyxl` files](https://pyxle.dev/docs/guides/debugging-pyxl)
+- [Debugging `.pyxl` files](https://pyxle.dev/docs/guides/debugging)
 - [Pyxle Studio](https://pyxle.dev/docs/guides/studio)
 - [Pyxle documentation](https://pyxle.dev/docs)
 
