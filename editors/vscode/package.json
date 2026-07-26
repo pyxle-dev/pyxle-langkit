@@ -41,7 +41,7 @@
     "watch": "node esbuild.js --watch",
     "lint": "tsc --noEmit",
     "pretest": "tsc -p tsconfig.test.json",
-    "test": "node --test \"out-test/test/**/*.test.js\"",
+    "test": "cd out-test && node --test",
     "package": "npm run compile && npx @vscode/vsce package --no-dependencies"
   },
   "contributes": {
