@@ -20,7 +20,7 @@ jobs:
     outputs:
       publish: ${{ steps.compare.outputs.publish }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - id: compare
         env:
@@ -46,7 +46,7 @@ jobs:
     environment: pypi
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - uses: actions/setup-python@v5
         with:
