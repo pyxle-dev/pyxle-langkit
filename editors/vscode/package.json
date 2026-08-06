@@ -2,7 +2,7 @@
   "name": "pyxle-language-tools",
   "displayName": "Pyxle Language Tools",
   "publisher": "pyxle",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "description": "Language support and debugging for Pyxle .pyxl files \u2014 syntax highlighting, diagnostics, completions, hover, go-to-definition, formatting, and full-stack breakpoint debugging.",
   "license": "MIT",
   "repository": {
