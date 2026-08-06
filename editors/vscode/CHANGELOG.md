@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.3.1
 
 - **Fix: the dev server is no longer interrupted seconds after it starts.** "Debug Pyxle app (React browser)" used to start `pyxle dev` by typing into a shell terminal. Anything may write to a shell terminal, and the Python extension activates your environment in every new one — through an API that sends `^C` first to interrupt whatever is running. The freshly started server was killed and the activation line (`pyenv shell …`, `source .venv/bin/activate`) typed in its place. The extension now owns the process directly, so nothing else can type into it; the panel still shows the server's output and Ctrl-C still stops it cleanly.
 - **Fix: both debug configurations now run the same environment.** The React-browser flow ran whatever `pyxle` came first on your shell `PATH` while the Python flow ran VS Code's selected interpreter — routinely two different installs of two different versions. It now uses the selected interpreter for both, with the same pre-launch check.
