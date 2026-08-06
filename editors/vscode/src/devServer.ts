@@ -117,12 +117,17 @@ export class DevServerPty implements vscode.Pseudoterminal {
         child.once("error", (error) => {
             this.writeEmitter.fire(`\r\n\x1b[31m${String(error)}\x1b[0m\r\n`);
         });
-        // Settle on BOTH "exit" and "close" — and be idempotent. A process that
-        // never started (ENOENT, EACCES) emits "error" then "close" and *never*
-        // "exit", so keying liveness off "exit" alone would leave `running`
-        // true forever for a server that does not exist: Ctrl-C would print
-        // "Stopping..." and do nothing, and the dead entry could later be
-        // mistaken for a live server we own.
+        // Settle on "close", not "exit" — and be idempotent.
+        //
+        // "close" fires once the piped stdio has drained, so the traceback of a
+        // server that died on startup is already on the panel when we print the
+        // "stopped" line, and a deliberate stop doesn't close the terminal on
+        // top of output still in flight. "exit" fires first, before the drain.
+        //
+        // "close" also covers the case that motivated listening to both: a
+        // process that never started (ENOENT, EACCES) emits "error" then
+        // "close" and never "exit", so liveness still settles for a command
+        // that does not exist — verified against Node directly.
         const settleExit = (code: number | null, signal: string | null): void => {
             if (this.exited) {
                 return;
@@ -145,7 +150,6 @@ export class DevServerPty implements vscode.Pseudoterminal {
                 `\r\n\x1b[2mThe dev server stopped (${how}).\x1b[0m\r\n`,
             );
         };
-        child.once("exit", settleExit);
         child.once("close", settleExit);
     }
 
@@ -204,13 +208,23 @@ export class DevServerPty implements vscode.Pseudoterminal {
         }
         this.stopping = true;
         if (process.platform === "win32") {
-            try {
-                cp.spawn("taskkill", ["/pid", String(child.pid), "/T", "/F"], {
-                    windowsHide: true,
-                });
-            } catch {
-                /* fall through to the kill backstop below */
-            }
+            // `cp.spawn` reports a missing/blocked taskkill ASYNCHRONOUSLY as an
+            // "error" event — a try/catch here would never see it, and an
+            // unhandled "error" on a ChildProcess throws. Listen for it and fall
+            // back immediately rather than waiting out the SIGKILL timer, which
+            // would only reach the leader and strand Vite holding its port.
+            const killer = cp.spawn(
+                "taskkill",
+                ["/pid", String(child.pid), "/T", "/F"],
+                { windowsHide: true, stdio: "ignore" },
+            );
+            killer.on("error", () => {
+                try {
+                    child.kill();
+                } catch {
+                    /* already gone */
+                }
+            });
         } else {
             // Negative pid = the whole process group (we spawned detached).
             try {

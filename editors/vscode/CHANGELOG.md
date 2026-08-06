@@ -8,7 +8,7 @@
 - **The interpreter errors are no longer a dead end.** Both the "pyxle not installed" and the "too old" message now lead with **Select Interpreter** — the usual cause is that the right pyxle lives in a *different* environment — and the launch continues automatically once you pick one. The message also reports the version it found (labelled as package metadata) and offers the matching install/upgrade/repair command.
 - **New: the Python interpreter is visible and switchable from `.pyxl` files.** The Python extension only shows its interpreter indicator for `.py` files, so in a `.pyxl` editor you could neither see nor change the interpreter that debugging uses. A status-bar item now shows it (click to change), with a new **Pyxle: Select Python Interpreter** command.
 - **A pre-launch check that can't answer no longer blocks the launch.** If the interpreter crashes, times out, or won't start, the debugger now goes ahead and lets the debugger report the real error instead of claiming pyxle isn't installed.
-- **A dev server the extension started is stopped when VS Code shuts down**, rather than being left running and holding its port.
+- **A dev server the extension started is stopped when VS Code shuts down normally**, rather than being left running and holding its port. It runs in its own process group so one signal takes the whole tree (Vite and the SSR workers) down with it; that also means a force-quit or an extension-host crash can still leave it running, in which case stop it from the terminal it prints to.
 - Command palette entries no longer read "Pyxle: Pyxle: …".
 
 ## 0.3.0

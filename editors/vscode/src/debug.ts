@@ -690,6 +690,9 @@ export class PyxleDebugConfigurationProvider
         // resolution that spawned it (that call returns immediately), so it must
         // not ride the resolver's cancellation token.
         const source = new vscode.CancellationTokenSource();
+        // Set when we start the server ourselves: cancels the readiness wait if
+        // that server exits before it ever becomes discoverable.
+        let exitedEarly: vscode.Disposable | undefined;
         try {
             // Start a dev server only if there's no LIVE one. A leftover
             // discovery file from a crashed/killed server (its process gone,
@@ -715,22 +718,41 @@ export class PyxleDebugConfigurationProvider
                 if (interpreter === false) {
                     return;
                 }
-                // Own the process rather than typing into a shell: a shell
-                // terminal is writable by any extension, and the Python
-                // extension's environment activation interrupts (^C) whatever
-                // is running in it — killing the server seconds after it starts.
-                const { terminal, pty } = startDevServerTerminal(
-                    devServerSpec(interpreter, projectRoot, devArgs),
-                );
-                terminal.show(true);
-                ownerId = `${process.pid}-${(ownerSeq += 1)}`;
-                ownedServers.set(ownerId, {
-                    terminal,
-                    pty,
-                    projectRoot,
-                    refs: new Set(),
-                });
-                createdServer = true;
+                // The gate above can block for an unbounded time — a probe, an
+                // error dialog, then the interpreter quick pick. A server may
+                // well have come up meanwhile (the user starting Backend, or
+                // `pyxle dev` in a terminal), so re-check before spawning a
+                // second one onto a port that is now taken.
+                const nowLive = readDiscovery(projectRoot);
+                if (nowLive && (await discoveryIsLive(nowLive))) {
+                    ownerId = liveOwnerForRoot(projectRoot, nowLive.startedAt);
+                    if (ownerId) {
+                        cancelServerStop(ownerId);
+                    }
+                } else {
+                    // Own the process rather than typing into a shell: a shell
+                    // terminal is writable by any extension, and the Python
+                    // extension's environment activation interrupts (^C) whatever
+                    // is running in it — killing the server seconds after it starts.
+                    const { terminal, pty } = startDevServerTerminal(
+                        devServerSpec(interpreter, projectRoot, devArgs),
+                    );
+                    terminal.show(true);
+                    ownerId = `${process.pid}-${(ownerSeq += 1)}`;
+                    ownedServers.set(ownerId, {
+                        terminal,
+                        pty,
+                        projectRoot,
+                        refs: new Set(),
+                    });
+                    createdServer = true;
+                    // If the server dies before discovery appears — a broken
+                    // interpreter the probe could not rule out, a port clash —
+                    // stop waiting immediately. Without this the launch sits on
+                    // the 120s timeout with `browserLaunchInFlight` held, so
+                    // every further F5 is silently ignored for two minutes.
+                    exitedEarly = pty.onDidExit(() => source.cancel());
+                }
             } else {
                 // A live server exists. If WE own the one that's actually serving
                 // (matched by its discovery startedAt, not just an open terminal),
@@ -768,11 +790,14 @@ export class PyxleDebugConfigurationProvider
                 }
                 if (!url) {
                     void vscode.window.showErrorMessage(
-                        "Pyxle: the dev server didn't come up, so the React debugger couldn't attach. Start it with `pyxle dev` and try again.",
+                        createdServer && source.token.isCancellationRequested
+                            ? "Pyxle: the dev server exited before it was ready — see the Pyxle Dev panel for the error."
+                            : "Pyxle: the dev server didn't come up, so the React debugger couldn't attach. Start it with `pyxle dev` and try again.",
                     );
                 }
             }
         } finally {
+            exitedEarly?.dispose();
             browserLaunchInFlight.delete(projectRoot);
             source.dispose();
         }
