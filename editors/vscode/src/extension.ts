@@ -27,8 +27,14 @@ import {
     LanguageClientOptions,
     ServerOptions,
 } from "vscode-languageclient/node";
-import { createStatusBar, updateStatus, StatusState } from "./status";
+import {
+    createStatusBar,
+    updateStatus,
+    StatusState,
+    registerInterpreterStatus,
+} from "./status";
 import { registerDebugSupport } from "./debug";
+import { showInterpreterPicker } from "./python";
 
 const LANGUAGE_ID = "pyxle";
 const MAX_RETRIES = 3;
@@ -65,6 +71,17 @@ export function activate(context: vscode.ExtensionContext): void {
                 });
         }),
     );
+
+    // Registered BEFORE the status item, whose `command` points at it — a
+    // StatusBarItem referencing an unregistered command silently no-ops.
+    context.subscriptions.push(
+        vscode.commands.registerCommand("pyxle.selectPythonInterpreter", () =>
+            showInterpreterPicker(),
+        ),
+    );
+    // The Python extension only shows its interpreter item for Python files, so
+    // surface one for .pyxl — debugging runs `python -m pyxle dev` under it.
+    registerInterpreterStatus(context, LANGUAGE_ID);
 
     registerDebugSupport(context);
 

@@ -3,7 +3,7 @@
   "displayName": "Pyxle Language Tools",
   "publisher": "pyxle",
   "version": "0.3.0",
-  "description": "Language support and debugging for Pyxle .pyxl files — syntax highlighting, diagnostics, completions, hover, go-to-definition, formatting, and full-stack breakpoint debugging.",
+  "description": "Language support and debugging for Pyxle .pyxl files \u2014 syntax highlighting, diagnostics, completions, hover, go-to-definition, formatting, and full-stack breakpoint debugging.",
   "license": "MIT",
   "repository": {
     "type": "git",
@@ -31,8 +31,7 @@
   ],
   "activationEvents": [
     "onLanguage:pyxle",
-    "onDebugResolve:pyxle",
-    "onCommand:pyxle.openStudio"
+    "onDebugResolve:pyxle"
   ],
   "main": "./out/extension.js",
   "scripts": {
@@ -53,12 +52,17 @@
     "commands": [
       {
         "command": "pyxle.openStudio",
-        "title": "Pyxle: Open Studio",
+        "title": "Open Studio",
         "category": "Pyxle"
       },
       {
         "command": "pyxle.showInstallGuide",
-        "title": "Pyxle: Show Language Server Install Guide",
+        "title": "Show Language Server Install Guide",
+        "category": "Pyxle"
+      },
+      {
+        "command": "pyxle.selectPythonInterpreter",
+        "title": "Select Python Interpreter",
         "category": "Pyxle"
       }
     ],
@@ -79,12 +83,12 @@
               },
               "server": {
                 "type": "boolean",
-                "description": "Debug the Python side — run the dev server under debugpy so breakpoints in @server loaders and @action handlers bind. Set false to debug only the React/JSX side in a standalone Chrome session.",
+                "description": "Debug the Python side \u2014 run the dev server under debugpy so breakpoints in @server loaders and @action handlers bind. Set false to debug only the React/JSX side in a standalone Chrome session.",
                 "default": true
               },
               "browser": {
                 "type": "boolean",
-                "description": "When debugging the Python side, open the app in your browser once the dev server is ready. (React/JSX debugging is a separate launch — set \"server\": false.)",
+                "description": "When debugging the Python side, open the app in your browser once the dev server is ready. (React/JSX debugging is a separate launch \u2014 set \"server\": false.)",
                 "default": true
               },
               "url": {
@@ -94,7 +98,9 @@
               "args": {
                 "type": "array",
                 "description": "Extra arguments passed to `pyxle dev` (e.g. [\"--port\", \"3000\"]).",
-                "items": { "type": "string" },
+                "items": {
+                  "type": "string"
+                },
                 "default": []
               },
               "justMyCode": {
@@ -148,7 +154,7 @@
         "configurationSnippets": [
           {
             "label": "Pyxle: Debug app (Python)",
-            "description": "Run the dev server under the debugger — breakpoints in .pyxl @server loaders and @action handlers bind. Opens the app in your browser. One clean debug session.",
+            "description": "Run the dev server under the debugger \u2014 breakpoints in .pyxl @server loaders and @action handlers bind. Opens the app in your browser. One clean debug session.",
             "body": {
               "type": "pyxle",
               "request": "launch",
@@ -157,7 +163,7 @@
           },
           {
             "label": "Pyxle: Debug React (browser)",
-            "description": "Debug the React/JSX half in a standalone Chrome session against the running dev server — breakpoints in .pyxl components bind.",
+            "description": "Debug the React/JSX half in a standalone Chrome session against the running dev server \u2014 breakpoints in .pyxl components bind.",
             "body": {
               "type": "pyxle",
               "request": "launch",

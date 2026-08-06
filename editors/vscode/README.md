@@ -36,7 +36,7 @@ The command **"Pyxle: Open Studio"** opens the running dev server's [Studio dash
 
 ## Requirements
 
-- **[pyxle-framework](https://pypi.org/project/pyxle-framework/) 0.8.0 or newer** in your project's Python environment (the launch model runs `python -m pyxle dev`, and `.pyxl` debugging relies on the framework's line mapping shipped in 0.8.0). Point VS Code at that environment with **Python: Select Interpreter** — the debugger checks it has pyxle before launching and guides you if not.
+- **[pyxle-framework](https://pypi.org/project/pyxle-framework/) 0.8.0 or newer** in your project's Python environment (the launch model runs `python -m pyxle dev`, and `.pyxl` debugging relies on the framework's line mapping shipped in 0.8.0). Both debug configurations use the interpreter VS Code has selected — the status-bar item shown while a `.pyxl` file is open tells you which one that is, and clicking it (or **Pyxle: Select Python Interpreter**) changes it. The debugger checks the interpreter can run the dev server before launching and, if it can't, offers to switch to one that can.
 - The **[Python extension](https://marketplace.visualstudio.com/items?itemName=ms-python.python)** (`ms-python.python`) for the Python side of debugging. The debugger offers to install it if it's missing, and still debugs the React side without it.
 - The language server: `pip install pyxle-langkit` (bundled as a default dependency of `pyxle-framework`, so a normal Pyxle project already has it).
 

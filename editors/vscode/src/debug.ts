@@ -30,7 +30,6 @@
  */
 
 import * as vscode from "vscode";
-import * as cp from "child_process";
 import * as fs from "fs";
 import * as os from "os";
 import * as path from "path";
@@ -40,8 +39,14 @@ import {
     readDiscovery,
     sleep,
 } from "./discovery";
+import { probePyxleInterpreter, reportedAtLeast } from "./interpreter";
+import {
+    PYTHON_EXTENSION_ID,
+    pickInterpreter,
+    selectedInterpreterPath as selectedInterpreter,
+} from "./python";
+import { DevServerPty, devServerSpec, startDevServerTerminal } from "./devServer";
 
-const PYTHON_EXTENSION_ID = "ms-python.python";
 // The `debugpy` debug adapter is contributed by a SEPARATE extension from the
 // language features. It activates lazily (e.g. on opening a .py file), so a
 // launch fired before it wakes up fails with "Couldn't find a debug adapter
@@ -76,20 +81,22 @@ const BROWSER_MARKER = "__pyxleBrowser";
  */
 const SERVER_OWNER_MARKER = "__pyxleServerOwner";
 
-/** The Ctrl-C (ETX) byte; `pyxle dev` handles SIGINT with a clean shutdown. */
-const CTRL_C = String.fromCharCode(3);
-
 interface OwnedServer {
-    /** The "Pyxle Dev" terminal running `pyxle dev`. */
+    /** The "Pyxle Dev" terminal presenting the dev server. */
     terminal: vscode.Terminal;
+    /**
+     * The pty that owns the `pyxle dev` process. We spawn it ourselves rather
+     * than typing into a shell, so liveness and shutdown are exact — see
+     * `devServer.ts` for why a shell terminal is unsafe here.
+     */
+    pty: DevServerPty;
     projectRoot: string;
     /** Live React debug sessions using this server; it stops when this empties. */
     refs: Set<string>;
     /**
      * The discovery `startedAt` of the server this terminal actually brought up,
-     * recorded once it's live. Used to tell whether the currently-live server is
-     * really ours: a bare "terminal shell still open" check would misfire if our
-     * `pyxle dev` crashed to a prompt and a different server later took the port.
+     * recorded once it's live. Belt-and-braces against a *foreign* server having
+     * taken the port: our own process liveness is already authoritative.
      */
     startedAt?: number;
 }
@@ -116,8 +123,6 @@ let ownerSeq = 0;
  * prompt (whose Stop click could otherwise hit the server the restart needs).
  */
 const SERVER_RESTART_GUARD_MS = 4000;
-/** Grace after Ctrl-C for `pyxle dev` to shut down before closing its terminal. */
-const SERVER_SHUTDOWN_GRACE_MS = 2500;
 
 /**
  * The owner id of the server THIS extension started that matches the currently
@@ -136,7 +141,7 @@ function liveOwnerForRoot(
     for (const [ownerId, server] of ownedServers) {
         if (
             server.projectRoot === projectRoot &&
-            server.terminal.exitStatus === undefined &&
+            server.pty.running &&
             server.startedAt === liveStartedAt
         ) {
             return ownerId;
@@ -154,24 +159,13 @@ function cancelServerStop(ownerId: string): void {
     }
 }
 
-/** Ctrl-C the server's terminal (clean `pyxle dev` shutdown), then close it. */
-function stopOwnedServerTerminal(server: OwnedServer): void {
-    const { terminal } = server;
-    if (terminal.exitStatus !== undefined) {
-        return; // already exited
-    }
-    try {
-        terminal.sendText(CTRL_C);
-    } catch {
-        return; // terminal disposed between the check and the send
-    }
-    setTimeout(() => {
-        try {
-            terminal.dispose();
-        } catch {
-            /* already gone */
-        }
-    }, SERVER_SHUTDOWN_GRACE_MS);
+/**
+ * Stop the dev server we started: SIGINT to its process group (a clean
+ * `pyxle dev` teardown that also takes Vite and the SSR workers down), with a
+ * SIGKILL backstop, then the panel closes with the process.
+ */
+function stopOwnedServer(server: OwnedServer): void {
+    server.pty.stop();
 }
 
 /**
@@ -210,7 +204,7 @@ async function promptStopOwnedServer(ownerId: string): Promise<void> {
         return;
     }
     ownedServers.delete(ownerId);
-    stopOwnedServerTerminal(server);
+    stopOwnedServer(server);
 }
 
 interface BrowserRequest {
@@ -319,86 +313,21 @@ async function ensurePythonExtension(): Promise<"ok" | "react-only" | "abort"> {
 /* ------------------------------------------------------------------ */
 
 /**
- * The interpreter path the Python extension has selected for `folder`, via its
- * stable Environments API. Returns undefined if the API isn't available (older
- * Python extension) — the caller then lets debugpy fall back to its default.
+ * How many times a failed interpreter check may be retried after the user picks
+ * a different interpreter, before we stop re-prompting.
  */
-async function selectedInterpreter(
-    folder: vscode.WorkspaceFolder | undefined,
-): Promise<string | undefined> {
-    try {
-        const ext = vscode.extensions.getExtension(PYTHON_EXTENSION_ID);
-        if (!ext) {
-            return undefined;
-        }
-        const api = ext.isActive ? ext.exports : await ext.activate();
-        const envs = api?.environments;
-        const envPath = envs?.getActiveEnvironmentPath?.(folder?.uri);
-        if (!envPath) {
-            return undefined;
-        }
-        const resolved = await envs.resolveEnvironment?.(envPath);
-        return resolved?.executable?.uri?.fsPath ?? envPath.path;
-    } catch {
-        return undefined;
-    }
-}
-
-/** What a candidate interpreter can do, from one short probe. */
-type PyxleProbe =
-    /** Has pyxle AND `python -m pyxle` works — good to launch. */
-    | "ok"
-    /** pyxle imports, but `pyxle.__main__` is missing (pyxle-framework < 0.8.0). */
-    | "too-old"
-    /** pyxle is not installed in this interpreter at all. */
-    | "missing";
+const MAX_INTERPRETER_RETRIES = 2;
 
 /**
- * Probe what `python` can actually do (short, timeout-guarded).
+ * The `pyxle dev ...` argv both launch paths use.
  *
- * Checks the CAPABILITY the launch needs, not just that pyxle is present: the
- * debug launch runs `python -m pyxle dev`, which requires `pyxle.__main__` —
- * added in pyxle-framework 0.8.0. Probing only `import pyxle` would pass on an
- * 0.7.x install and then die with a cryptic "No module named pyxle.__main__".
+ * Shared so the Python-debug and React-browser flows can never drift apart, and
+ * forgives a stray leading "dev" in user args (e.g. copied from a shell
+ * command) so we never emit `pyxle dev dev`.
  */
-function probePyxleInterpreter(python: string): Promise<PyxleProbe> {
-    return new Promise((resolve) => {
-        let settled = false;
-        let timer: ReturnType<typeof setTimeout> | undefined;
-        const finish = (result: PyxleProbe, proc?: cp.ChildProcess): void => {
-            if (settled) return;
-            settled = true;
-            if (timer) {
-                clearTimeout(timer);
-            }
-            if (proc) {
-                try {
-                    proc.kill();
-                } catch {
-                    /* ignore */
-                }
-            }
-            resolve(result);
-        };
-        try {
-            // Exit 0 = ok, 3 = pyxle present but no `__main__` (pre-0.8.0),
-            // 4 = pyxle absent. Any other code (e.g. a broken install whose
-            // import raises) is treated as absent — same user action either way.
-            // find_spec locates `__main__` without executing it.
-            const script =
-                "import importlib.util as u, sys; " +
-                "sys.exit(4 if u.find_spec('pyxle') is None " +
-                "else (0 if u.find_spec('pyxle.__main__') else 3))";
-            const proc = cp.spawn(python, ["-c", script], { stdio: "ignore" });
-            proc.once("exit", (code) =>
-                finish(code === 0 ? "ok" : code === 3 ? "too-old" : "missing"),
-            );
-            proc.once("error", () => finish("missing"));
-            timer = setTimeout(() => finish("missing", proc), 6000);
-        } catch {
-            finish("missing");
-        }
-    });
+export function devServerArgs(userArgs: readonly string[] | undefined): string[] {
+    const args = userArgs ?? [];
+    return args[0] === "dev" ? [...args] : ["dev", ...args];
 }
 
 /**
@@ -408,50 +337,108 @@ function probePyxleInterpreter(python: string): Promise<PyxleProbe> {
  * selected interpreter. A very common setup has pyxle installed in one
  * environment while VS Code has a different interpreter selected — which fails
  * with a cryptic "No module named pyxle". This resolves the selected
- * interpreter and, when it lacks pyxle, guides the user to fix it rather than
- * launching a doomed session.
+ * interpreter and, when it can't launch, guides the user to fix it rather than
+ * starting a doomed session.
+ *
+ * Both failure modes lead with **Select Interpreter**, because the usual cause
+ * is that the right pyxle lives in a *different* environment — telling the user
+ * to upgrade the one VS Code happens to have selected is, in that case, wrong
+ * advice and a dead end. When they pick a new interpreter we re-check and carry
+ * on, so a fixable mistake doesn't cost another F5.
  *
  * Returns the interpreter path to pin on the debug config (so debugpy uses
  * exactly the one we checked), `undefined` to proceed with debugpy's default
- * (interpreter couldn't be determined — an older Python extension), or `false`
- * to abort (the interpreter is known and lacks pyxle; the user was prompted).
+ * (interpreter couldn't be determined — no/old Python extension), or `false`
+ * to abort (the interpreter is known and can't launch; the user was prompted).
  */
 async function ensurePyxleInterpreter(
     folder: vscode.WorkspaceFolder | undefined,
+    projectRoot: string,
+    attempt = 0,
 ): Promise<string | undefined | false> {
     const python = await selectedInterpreter(folder);
     if (!python) {
         return undefined; // can't determine — let debugpy use its default
     }
-    const probe = await probePyxleInterpreter(python);
-    if (probe === "ok") {
+    // Probe in the project root so imports resolve the way the launch will.
+    const probe = await probePyxleInterpreter(python, projectRoot);
+    if (probe.status === "ok") {
         return python; // pin it, so what we checked is what launches
     }
-    if (probe === "too-old") {
-        // pyxle is installed but predates `python -m pyxle` (added in 0.8.0).
-        // Launching would fail with a cryptic "No module named pyxle.__main__";
-        // name the real fix instead.
-        const choice = await vscode.window.showErrorMessage(
-            "Pyxle: debugging needs pyxle-framework 0.8.0 or newer — the version in " +
-                `the selected interpreter (${python}) is older and can't be launched ` +
-                "as `python -m pyxle`. Upgrade with `pip install --upgrade pyxle-framework`.",
-            "Copy upgrade command",
-        );
-        if (choice === "Copy upgrade command") {
-            await vscode.env.clipboard.writeText(
-                "pip install --upgrade pyxle-framework",
-            );
-        }
+    if (probe.status === "unknown") {
+        // The probe couldn't answer (the interpreter crashed, timed out, or
+        // wouldn't spawn). Never block on that: launch anyway and let debugpy
+        // report the real failure, exactly as it did before this check existed.
+        return python;
+    }
+
+    // The version is ADVISORY. An editable install carries the dist-info from
+    // `pip install -e` time, so a 0.8.0 checkout can still report 0.7.5 — the
+    // capability probe above stays authoritative, and the number is only shown
+    // (labelled as metadata) and used to pick the right remediation.
+    const reported = probe.reportedVersion
+        ? ` It reports pyxle-framework ${probe.reportedVersion} (package metadata, which can be stale in an editable install).`
+        : "";
+    let message: string;
+    let copyLabel: string;
+    let copyCommand: string;
+    if (probe.status === "too-old") {
+        // Metadata already claims >= 0.8.0 but `pyxle.__main__` is missing, so
+        // this is a broken/partial install, not an old one — "upgrade" would be
+        // a no-op. Repair it instead.
+        const looksIncomplete = reportedAtLeast(probe.reportedVersion, [0, 8, 0]);
+        message = looksIncomplete
+            ? `Pyxle: the selected Python interpreter (${python}) has a pyxle install that can't be ` +
+              `launched as \`python -m pyxle\` — it looks incomplete.${reported} ` +
+              "Reinstall it, or switch to the environment where a working pyxle is installed."
+            : "Pyxle: debugging needs pyxle-framework 0.8.0 or newer, and the selected interpreter " +
+              `(${python}) has an older one.${reported} ` +
+              "If pyxle 0.8.0+ is installed in a different environment, switch to it — " +
+              "otherwise upgrade this one.";
+        copyLabel = looksIncomplete ? "Copy repair command" : "Copy upgrade command";
+        copyCommand = looksIncomplete
+            ? "pip install --force-reinstall pyxle-framework"
+            : "pip install --upgrade pyxle-framework";
+    } else {
+        message =
+            `Pyxle: the selected Python interpreter (${python}) doesn't have pyxle installed, ` +
+            "so debugging can't launch the dev server. Select the environment where pyxle " +
+            "is installed — the one your terminal's `pyxle` command uses.";
+        copyLabel = "Copy install command";
+        copyCommand = "pip install pyxle-framework";
+    }
+
+    const choice = await vscode.window.showErrorMessage(
+        message,
+        "Select Interpreter",
+        copyLabel,
+    );
+    if (choice === copyLabel) {
+        await vscode.env.clipboard.writeText(copyCommand);
         return false;
     }
-    const choice = await vscode.window.showErrorMessage(
-        `Pyxle: the selected Python interpreter (${python}) doesn't have pyxle installed, ` +
-            "so debugging can't launch the dev server. Select the environment where pyxle " +
-            "is installed — the one your terminal's `pyxle` command uses.",
-        "Select Interpreter",
-    );
-    if (choice === "Select Interpreter") {
-        await vscode.commands.executeCommand("python.setInterpreter");
+    if (choice !== "Select Interpreter") {
+        return false; // dismissed
+    }
+    // Always open the picker when that button is clicked. The retry budget
+    // bounds how often *we* re-prompt; it must never turn the button into a
+    // silent no-op.
+    const switched = await pickInterpreter(folder);
+    if (switched && attempt < MAX_INTERPRETER_RETRIES) {
+        // A different interpreter — re-check from the top, so a still-bad one
+        // gets the same guidance instead of failing mid-launch.
+        return ensurePyxleInterpreter(folder, projectRoot, attempt + 1);
+    }
+    // Dismissed, re-picked the same one, or the budget is spent. Probe once
+    // more anyway — the user may have fixed *this* environment (a pip install
+    // in another window) rather than switching away from it — then give up
+    // quietly rather than re-opening the same dialog.
+    const current = await selectedInterpreter(folder);
+    if (current) {
+        const recheck = await probePyxleInterpreter(current, projectRoot);
+        if (recheck.status === "ok" || recheck.status === "unknown") {
+            return current;
+        }
     }
     return false;
 }
@@ -567,14 +554,19 @@ export class PyxleDebugConfigurationProvider
                 // Only an explicit "Debug React only" choice falls back to the
                 // browser flow; an install/dismiss must start nothing.
                 if (gate === "react-only" && browserRequest) {
-                    void this.launchBrowserOnly(folder, projectRoot, browserRequest);
+                    void this.launchBrowserOnly(
+                        folder,
+                        projectRoot,
+                        browserRequest,
+                        devServerArgs(pyxle.args),
+                    );
                 }
                 return undefined;
             }
             // The launch model runs `python -m pyxle dev` under the selected
             // interpreter — verify that interpreter actually has pyxle, or the
             // session dies with a cryptic "No module named pyxle".
-            const interpreter = await ensurePyxleInterpreter(folder);
+            const interpreter = await ensurePyxleInterpreter(folder, projectRoot);
             if (interpreter === false) {
                 return undefined; // wrong interpreter — the user was guided to fix it
             }
@@ -585,11 +577,7 @@ export class PyxleDebugConfigurationProvider
             if (browserRequest) {
                 browserRequest.since = readDiscovery(projectRoot)?.startedAt;
             }
-            // Forgive a stray leading "dev" in user args (e.g. copied from a
-            // shell command) so we never emit `pyxle dev dev`.
-            const userArgs = pyxle.args ?? [];
-            const args =
-                userArgs[0] === "dev" ? [...userArgs] : ["dev", ...userArgs];
+            const args = devServerArgs(pyxle.args);
             // Hand VS Code a debugpy launch of `python -m pyxle dev`. VS Code
             // owns the process → a real Stop button that tears the dev server
             // (Vite, SSR workers) down. Breakpoints in .pyxl bind because the
@@ -620,7 +608,12 @@ export class PyxleDebugConfigurationProvider
 
         // Server debugging off, browser on: no python session at all.
         if (browserRequest) {
-            void this.launchBrowserOnly(folder, projectRoot, browserRequest);
+            void this.launchBrowserOnly(
+                        folder,
+                        projectRoot,
+                        browserRequest,
+                        devServerArgs(pyxle.args),
+                    );
         }
         return undefined;
     }
@@ -683,6 +676,7 @@ export class PyxleDebugConfigurationProvider
         folder: vscode.WorkspaceFolder | undefined,
         projectRoot: string,
         browserRequest: BrowserRequest,
+        devArgs: string[],
     ): Promise<void> {
         // One launch per project at a time. Re-clicking "Debug frontend" before
         // the dev server is up must not spawn a second server or a second
@@ -696,6 +690,9 @@ export class PyxleDebugConfigurationProvider
         // resolution that spawned it (that call returns immediately), so it must
         // not ride the resolver's cancellation token.
         const source = new vscode.CancellationTokenSource();
+        // Set when we start the server ourselves: cancels the readiness wait if
+        // that server exits before it ever becomes discoverable.
+        let exitedEarly: vscode.Disposable | undefined;
         try {
             // Start a dev server only if there's no LIVE one. A leftover
             // discovery file from a crashed/killed server (its process gone,
@@ -707,19 +704,55 @@ export class PyxleDebugConfigurationProvider
             let ownerId: string | undefined;
             let createdServer = false;
             if (!existing || !(await discoveryIsLive(existing))) {
-                const terminal = vscode.window.createTerminal({
-                    name: "Pyxle Dev",
-                    cwd: projectRoot,
-                });
-                terminal.show(true);
-                terminal.sendText("pyxle dev");
-                ownerId = `${process.pid}-${(ownerSeq += 1)}`;
-                ownedServers.set(ownerId, {
-                    terminal,
+                // Validate the interpreter for THIS flow too. Previously it just
+                // typed `pyxle dev` into a shell, so it ran whatever `pyxle` was
+                // first on PATH — which is routinely a different environment
+                // than the one the Python-debug flow verifies and launches.
+                // `undefined` means the interpreter couldn't be determined (no
+                // Python extension); `false` means it can't launch and the user
+                // was already guided, so start nothing.
+                const interpreter = await ensurePyxleInterpreter(
+                    folder,
                     projectRoot,
-                    refs: new Set(),
-                });
-                createdServer = true;
+                );
+                if (interpreter === false) {
+                    return;
+                }
+                // The gate above can block for an unbounded time — a probe, an
+                // error dialog, then the interpreter quick pick. A server may
+                // well have come up meanwhile (the user starting Backend, or
+                // `pyxle dev` in a terminal), so re-check before spawning a
+                // second one onto a port that is now taken.
+                const nowLive = readDiscovery(projectRoot);
+                if (nowLive && (await discoveryIsLive(nowLive))) {
+                    ownerId = liveOwnerForRoot(projectRoot, nowLive.startedAt);
+                    if (ownerId) {
+                        cancelServerStop(ownerId);
+                    }
+                } else {
+                    // Own the process rather than typing into a shell: a shell
+                    // terminal is writable by any extension, and the Python
+                    // extension's environment activation interrupts (^C) whatever
+                    // is running in it — killing the server seconds after it starts.
+                    const { terminal, pty } = startDevServerTerminal(
+                        devServerSpec(interpreter, projectRoot, devArgs),
+                    );
+                    terminal.show(true);
+                    ownerId = `${process.pid}-${(ownerSeq += 1)}`;
+                    ownedServers.set(ownerId, {
+                        terminal,
+                        pty,
+                        projectRoot,
+                        refs: new Set(),
+                    });
+                    createdServer = true;
+                    // If the server dies before discovery appears — a broken
+                    // interpreter the probe could not rule out, a port clash —
+                    // stop waiting immediately. Without this the launch sits on
+                    // the 120s timeout with `browserLaunchInFlight` held, so
+                    // every further F5 is silently ignored for two minutes.
+                    exitedEarly = pty.onDidExit(() => source.cancel());
+                }
             } else {
                 // A live server exists. If WE own the one that's actually serving
                 // (matched by its discovery startedAt, not just an open terminal),
@@ -757,11 +790,14 @@ export class PyxleDebugConfigurationProvider
                 }
                 if (!url) {
                     void vscode.window.showErrorMessage(
-                        "Pyxle: the dev server didn't come up, so the React debugger couldn't attach. Start it with `pyxle dev` and try again.",
+                        createdServer && source.token.isCancellationRequested
+                            ? "Pyxle: the dev server exited before it was ready — see the Pyxle Dev panel for the error."
+                            : "Pyxle: the dev server didn't come up, so the React debugger couldn't attach. Start it with `pyxle dev` and try again.",
                     );
                 }
             }
         } finally {
+            exitedEarly?.dispose();
             browserLaunchInFlight.delete(projectRoot);
             source.dispose();
         }
@@ -834,6 +870,17 @@ export function registerDebugSupport(context: vscode.ExtensionContext): void {
     const provider = new PyxleDebugConfigurationProvider();
 
     context.subscriptions.push(
+        // Dev servers we started run in their own process group, so nothing
+        // reaps them if the extension goes away. Take them down with us —
+        // otherwise closing the window leaves `pyxle dev` and Vite holding
+        // their ports with no terminal left to stop them from.
+        {
+            dispose: () => {
+                for (const server of ownedServers.values()) {
+                    server.pty.dispose();
+                }
+            },
+        },
         // Default trigger powers launch.json resolution AND the resolve chain.
         vscode.debug.registerDebugConfigurationProvider("pyxle", provider),
         // The Dynamic trigger makes "Debug Pyxle app" appear in the Run-and-Debug
