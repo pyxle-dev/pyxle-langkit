@@ -1,5 +1,16 @@
 # Changelog
 
+## Unreleased
+
+- **Fix: the dev server is no longer interrupted seconds after it starts.** "Debug Pyxle app (React browser)" used to start `pyxle dev` by typing into a shell terminal. Anything may write to a shell terminal, and the Python extension activates your environment in every new one — through an API that sends `^C` first to interrupt whatever is running. The freshly started server was killed and the activation line (`pyenv shell …`, `source .venv/bin/activate`) typed in its place. The extension now owns the process directly, so nothing else can type into it; the panel still shows the server's output and Ctrl-C still stops it cleanly.
+- **Fix: both debug configurations now run the same environment.** The React-browser flow ran whatever `pyxle` came first on your shell `PATH` while the Python flow ran VS Code's selected interpreter — routinely two different installs of two different versions. It now uses the selected interpreter for both, with the same pre-launch check.
+- **A stale editable install is no longer mistaken for an old one.** The pre-launch check asks what the interpreter *can do* (can it run `python -m pyxle`) rather than what its package metadata claims, so an editable/dev install whose dist-info still says `0.7.5` while the code is current launches normally.
+- **The interpreter errors are no longer a dead end.** Both the "pyxle not installed" and the "too old" message now lead with **Select Interpreter** — the usual cause is that the right pyxle lives in a *different* environment — and the launch continues automatically once you pick one. The message also reports the version it found (labelled as package metadata) and offers the matching install/upgrade/repair command.
+- **New: the Python interpreter is visible and switchable from `.pyxl` files.** The Python extension only shows its interpreter indicator for `.py` files, so in a `.pyxl` editor you could neither see nor change the interpreter that debugging uses. A status-bar item now shows it (click to change), with a new **Pyxle: Select Python Interpreter** command.
+- **A pre-launch check that can't answer no longer blocks the launch.** If the interpreter crashes, times out, or won't start, the debugger now goes ahead and lets the debugger report the real error instead of claiming pyxle isn't installed.
+- **A dev server the extension started is stopped when VS Code shuts down**, rather than being left running and holding its port.
+- Command palette entries no longer read "Pyxle: Pyxle: …".
+
 ## 0.3.0
 
 - **Breakpoint debugging of `.pyxl` files.** New `pyxle` debug type. Press **F5** ("Debug Pyxle app") to run your dev server under the debugger — one clean session with a real Stop/Restart/Pause — and open your app. Breakpoints bind in the Python half (`@server` loaders, `@action` handlers). Debug the React half (JSX) with the separate "Debug Pyxle app (React browser)" configuration (`"server": false`), a standalone Chrome session against the same dev server. Both halves of a page are breakpointable in the one `.pyxl` file you already have open. Also supports `"request": "attach"` for an already-running `pyxle dev --inspect`.

@@ -6,8 +6,18 @@
     "noEmit": false,
     "noUnusedLocals": false,
     "noUnusedParameters": false,
-    "types": ["node"]
+    "types": [
+      "node"
+    ]
   },
-  "include": ["src/discovery.ts", "test/**/*.ts"],
-  "exclude": ["node_modules", "out", "out-test"]
+  "include": [
+    "src/discovery.ts",
+    "src/interpreter.ts",
+    "test/**/*.ts"
+  ],
+  "exclude": [
+    "node_modules",
+    "out",
+    "out-test"
+  ]
 }
